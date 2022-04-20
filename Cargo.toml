@@ -1,0 +1,18 @@
+[package]
+name = "owl"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+udev = "^0.6.3"
+piet = "0.5.0"
+piet-common = "0.5.0"
+cairo-rs = "^0.14.0"
+serde = { version = "1.0", features = ["derive"]}
+toml = "0.5"
+argh = "0.1.7"
+
+[dependencies.smithay-client-toolkit]
+git = "https://github.com/Smithay/client-toolkit"
