@@ -1,5 +1,3 @@
-// TODO investigate fullscreen mode rules. Currently overlaps fullscreen elements.
-
 use smithay_client_toolkit::{
     default_environment,
     environment::SimpleGlobal,
@@ -17,27 +15,30 @@ use smithay_client_toolkit::{
     shm::AutoMemPool,
     WaylandSource,
 };
+use owl::{SharedLoopData, UpdateHandle, EventLoop};
 
 use argh::FromArgs;
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::Read;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::RwLock;
+use log::error;
 use piet::{ImageFormat, RenderContext, TextLayoutBuilder};
 use piet::{kurbo::Rect, Color};
 use piet::kurbo::Point;
 use piet_common::{BitmapTarget, CairoRenderContext, CairoTextLayout, CairoTextLayoutBuilder, Device, Text};
-use crate::modules::Module;
+use owl::wayland::{SurfaceAction, WaylandContext};
 
 mod config;
-//mod udev;
-mod modules;
+mod udev;
 //mod bar;
 
 const DEFAULT_CONFIG_PATH: &str = "~/.config/.rs-bar";
 
 #[derive(FromArgs)]
-#[argh(description = "Wayland status bar (greeeeeeeen)")]
+#[argh(description = "Wayland status bar")]
 struct Args {
     /// path to configuration file
     #[argh(option, short = 'c')]
@@ -62,75 +63,16 @@ impl Args {
     }
 }
 
-default_environment!(Env,
-    fields = [
-        layer_shell: SimpleGlobal<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
-    ],
-    singles = [
-        zwlr_layer_shell_v1::ZwlrLayerShellV1 => layer_shell
-    ],
-);
-
-#[derive(PartialEq, Copy, Clone)]
-enum RenderEvent {
-    Configure { width: u32, height: u32 },
-    Closed,
-}
-
-struct PietWaylandSurface<'a> {
-    image_surface: cairo::ImageSurface,
-    context: cairo::Context,
-    phantom: std::marker::PhantomData<&'a ()>,
-}
-
-impl<'a> PietWaylandSurface<'a> {
-    fn new(canvas: &'a mut [u8], width: i32, height: i32, stride: i32) -> Self {
-        let image_surface = unsafe {
-            cairo::ImageSurface::create_for_data_unsafe(
-                canvas.as_mut_ptr(),
-                cairo::Format::ARgb32,
-                width,
-                height,
-                stride,
-            ).expect("Unable to create ImageSurface for wayland canvas,")
-        };
-
-        let context = cairo::Context::new(&image_surface)
-            .expect("Unable to create Context from ImageSurface");
-
-        PietWaylandSurface {
-            image_surface,
-            context,
-            phantom: PhantomData::default(),
-        }
-    }
-
-    fn get_context(&mut self) -> piet_common::CairoRenderContext {
-        CairoRenderContext::new(&self.context)
-    }
-}
-
-struct Surface {
-    surface: wl_surface::WlSurface,
-    layer_surface: Main<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1>,
-    next_render_event: Rc<Cell<Option<RenderEvent>>>,
-    pool: AutoMemPool,
-    dimensions: (u32, u32),
-}
-
-impl Surface {
+/*impl Surface {
     fn new(
         output: &wl_output::WlOutput,
         surface: wl_surface::WlSurface,
         layer_shell: &Attached<zwlr_layer_shell_v1::ZwlrLayerShellV1>,
         pool: AutoMemPool,
+        modules: owl::Modules, // TODO merge modules and config to one
+        config: Rc<config::Bar>,
     ) -> Self {
-        let layer_surface = layer_shell.get_layer_surface(
-            &surface,
-            Some(output),
-            zwlr_layer_shell_v1::Layer::Overlay,
-            "example".to_owned(),
-        );
+
 
         layer_surface.set_size(1920, 30);
         // Anchor to the top left corner of the output
@@ -157,7 +99,7 @@ impl Surface {
         // Commit so that the server will send a configure event
         surface.commit();
 
-        Self { surface, layer_surface, next_render_event, pool, dimensions: (0, 0) }
+        Self { surface, layer_surface, next_render_event, pool, dimensions: (0, 0), modules, config }
     }
 
     /// Handles any events that have occurred since the last call, redrawing if needed.
@@ -195,9 +137,16 @@ impl Surface {
             Rect::new(0.0, 0.0, 1920.0, 30.0),
             &Color::rgba8(0, 255, 0, 255));
 
+
+        let mut text_source = String::new();
+        if let Ok(modules) = self.modules.read() {
+            let _ = modules.get("battery")
+                .map(|m| m.write("charge", &mut text_source));
+        }
+
         let mut text = piet_common::CairoText::new();
-        let mut layout_builder = text.new_text_layout("Text test")
-            .text_color(Color::rgba8(0xFF,0,0,0xFF))
+        let mut layout_builder = text.new_text_layout(text_source)
+            .text_color(Color::rgba8(0xFF, 0, 0, 0xFF))
             .alignment(piet_common::TextAlignment::Center)
             .build()
             .expect("Unable build text layout");
@@ -214,79 +163,53 @@ impl Surface {
         // Finally, commit the surface
         self.surface.commit();
     }
-}
+}*/
 
-impl Drop for Surface {
-    fn drop(&mut self) {
-        self.layer_surface.destroy();
-        self.surface.destroy();
-    }
-}
 
+
+
+
+// TODO remove/reduce unwrap usage in main
 fn main() {
     let args: Args = argh::from_env();
     let config = args.load_config();
 
-    let config = match config {
+    let config = Rc::new(match config {
         Ok(bar) => bar,
         Err(err) => {
-            println!("{:?}", err);
+            error!("{:?}", err);
             let path = args.config.as_ref().map(String::as_str).unwrap_or(DEFAULT_CONFIG_PATH);
-            println!("Unable to load config: {}", path); // TODO print to error pipe instead.
+            error!("Unable to load config: {}", path);
             return;
         }
-    };
+    });
 
-    let mut bat_mod = modules::battery::BatteryModule::init();
-
-    let (env, display, queue) =
-        new_default_environment!(Env, fields = [layer_shell: SimpleGlobal::new(),])
-            .expect("Initial roundtrip failed!");
-
-    let surfaces = Rc::new(RefCell::new(Vec::new()));
-
-    let layer_shell = env.require_global::<zwlr_layer_shell_v1::ZwlrLayerShellV1>();
-
-    let env_handle = env.clone();
-    let surfaces_handle = Rc::clone(&surfaces);
-    let output_handler = move |output: wl_output::WlOutput, info: &OutputInfo| {
-        if info.obsolete {
-            // an output has been removed, release it
-            surfaces_handle.borrow_mut().retain(|(i, _)| *i != info.id);
-            output.release();
-        } else {
-            // an output has been created, construct a surface for it
-            let surface = env_handle.create_surface().detach();
-            let pool = env_handle.create_auto_pool().expect("Failed to create a memory pool!");
-            (*surfaces_handle.borrow_mut())
-                .push((info.id, Surface::new(&output, surface, &layer_shell.clone(), pool)));
-        }
-    };
-
-    // Process currently existing outputs
-    for output in env.get_all_outputs() {
-        if let Some(info) = with_output_info(&output, Clone::clone) {
-            output_handler(output, &info);
-        }
+    let modules: owl::Modules = Rc::new(RwLock::new(HashMap::new()));
+    let modules_ref = modules.clone();
+    {
+        let mut modules = modules.write().unwrap();
+        let mut bat_mod = owl::modules::battery::BatteryModule::init()
+            .expect("Unable to initialise battery module");
+        modules.insert("battery", Box::new(bat_mod));
     }
 
-    // Setup a listener for changes
-    // The listener will live for as long as we keep this handle alive
-    let _listener_handle =
-        env.listen_for_outputs(move |output, info, _| output_handler(output, info));
+    let wayland_context = WaylandContext::new().unwrap();
+    let mut event_loop = EventLoop::try_new().unwrap();
+    let wayland_context = wayland_context.insert_queue_in(event_loop.handle()).unwrap();
 
-    let mut event_loop = calloop::EventLoop::<()>::try_new().unwrap();
-
-    WaylandSource::new(queue).quick_insert(event_loop.handle()).unwrap();
+    let mut loop_data = SharedLoopData {
+        update_handle: UpdateHandle::new(),
+        modules: modules_ref,
+    };
 
     loop {
         // This is ugly, let's hope that some version of drain_filter() gets stabilized soon
         // https://github.com/rust-lang/rust/issues/43244
         {
-            let mut surfaces = surfaces.borrow_mut();
+            let mut surfaces = wayland_context.surfaces.borrow_mut();
             let mut i = 0;
             while i != surfaces.len() {
-                if surfaces[i].1.handle_events() {
+                if let SurfaceAction::Drop = surfaces[i].1.handle_events() {
                     surfaces.remove(i);
                 } else {
                     i += 1;
@@ -294,7 +217,7 @@ fn main() {
             }
         }
 
-        display.flush().unwrap();
-        event_loop.dispatch(None, &mut ()).unwrap();
+        wayland_context.flush_display().unwrap();
+        event_loop.dispatch(None, &mut loop_data).unwrap();
     }
 }

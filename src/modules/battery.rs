@@ -3,7 +3,7 @@ use std::ffi::OsStr;
 use std::fmt::{Display, Formatter, Write};
 use std::path::Path;
 use udev::Device;
-use crate::modules::{Module, Result, Error};
+use crate::modules::{Module, Result, Error, Named};
 
 enum ChargeState {
     Charging,
@@ -33,10 +33,8 @@ pub struct BatteryModule {
     charge_state: ChargeState,
 }
 
-impl Module for BatteryModule {
-    const NAME: &'static str = "battery";
-
-    fn init() -> Result<Self> {
+impl BatteryModule {
+    pub fn init() -> Result<Self> {
         const PATH: &str = "/sys/class/power_supply/BAT0";
         // TODO optionally grab device path from config
         let device = udev::Device::from_syspath(&Path::new(PATH))?;
@@ -55,13 +53,19 @@ impl Module for BatteryModule {
             charge_state,
         })
     }
+}
 
-    fn write(&self, field: &str, dst: &mut String) -> Result<()> {
+impl Named for BatteryModule {
+    const NAME: &'static str = "battery";
+}
+
+impl Module for BatteryModule {
+    fn write(&self, field: &str, dst: &mut String) -> Result<bool> {
         match field {
-            "charge" => {write!(dst, "{}", self.charge);},
-            "charge_state" => {write!(dst, "{}", self.charge_state);},
+            "charge" => { write!(dst, "{}", self.charge).expect("Write failed");},
+            "charge_state" => {write!(dst, "{}", self.charge_state).expect("Write failed");},
             _ => eprintln!("Unrecognized requested field {}:{}, leaving string empty.", Self::NAME, field)
         }
-        Ok(())
+        Ok(true)
     }
 }

@@ -5,6 +5,9 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name = "sway_ipc_test"
+
 [dependencies]
 udev = "^0.6.3"
 piet = "0.5.0"
@@ -13,6 +16,10 @@ cairo-rs = "^0.14.0"
 serde = { version = "1.0", features = ["derive"]}
 toml = "0.5"
 argh = "0.1.7"
+byteorder = "1"
+serde_json = "1"
+log = { version = "0.4", features = ["release_max_level_info"] }
+env_logger = "0.9"
 
 [dependencies.smithay-client-toolkit]
 git = "https://github.com/Smithay/client-toolkit"
